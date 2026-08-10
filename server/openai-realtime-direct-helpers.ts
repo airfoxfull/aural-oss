@@ -10,12 +10,23 @@ export interface InterviewQuestion {
 export interface InterviewContext {
   title: string;
   objective?: string | null;
+  jobDescription?: string | null;
+  candidateProfile?: string | null;
   aiName: string;
   aiTone: string;
   language: string;
   followUpDepth: string;
   startQuestionIndex?: number;
   questions: InterviewQuestion[];
+}
+
+const MAX_JOB_DESCRIPTION_CHARS = 12_000;
+const MAX_CANDIDATE_PROFILE_CHARS = 16_000;
+
+export function clipContextText(value: string | null | undefined, maxChars: number): string {
+  const normalized = (value || "").replace(/\r\n/g, "\n").trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars)}\n...[truncated]`;
 }
 
 export function isChineseInterview(ctx: InterviewContext): boolean {
@@ -89,6 +100,22 @@ function questionDetails(question: InterviewQuestion, index: number): string {
   return parts.join("\n");
 }
 
+function buildBackgroundContext(ctx: InterviewContext, isZh: boolean): string {
+  const jobDescription = clipContextText(ctx.jobDescription, MAX_JOB_DESCRIPTION_CHARS);
+  const candidateProfile = clipContextText(ctx.candidateProfile, MAX_CANDIDATE_PROFILE_CHARS);
+  if (!jobDescription && !candidateProfile) return "";
+
+  if (isZh) {
+    return `\n## 岗位与候选人背景（仅作为追问依据，不要逐字念出）\n${
+      jobDescription ? `### JD / 岗位要求\n${jobDescription}\n` : ""
+    }${candidateProfile ? `### 候选人简历 / 背景\n${candidateProfile}\n` : ""}\n使用这些背景去验证匹配度和项目真实性。优先追问简历中与 JD 最相关、最值得验证、最可能影响录用判断的内容。不要因为简历写了某项能力就默认候选人掌握。`;
+  }
+
+  return `\n## Role and candidate background (silent evidence context; do not read verbatim)\n${
+    jobDescription ? `### Job description\n${jobDescription}\n` : ""
+  }${candidateProfile ? `### Candidate resume/profile\n${candidateProfile}\n` : ""}\nUse this context to verify role fit and project authenticity. Prioritize resume claims that are most relevant to the JD and most important to a hiring decision. Never assume a skill is proven merely because it appears on the resume.`;
+}
+
 export function buildInterviewInstructions(
   ctx: InterviewContext,
   currentQuestionIndex: number,
@@ -100,6 +127,7 @@ export function buildInterviewInstructions(
   const maxFollowUps = followUpLimit(ctx.followUpDepth);
   const isZh = isChineseInterview(ctx);
   const list = questions.map(questionDetails).join("\n");
+  const backgroundContext = buildBackgroundContext(ctx, isZh);
 
   if (isZh) {
     return `你是“${ctx.aiName}”，一位${ctx.aiTone}的真人感 AI 面试官。你的任务是验证候选人的真实能力，而不是帮助候选人作答。
@@ -110,6 +138,7 @@ ${ctx.objective ? `- 岗位/目标：${ctx.objective}` : ""}
 - 当前题：${total ? `${current + 1}/${total}` : "无预设题"}
 - 当前题目：${active?.text ?? "根据岗位目标进行开放式面试"}
 - 每题最多追问：${maxFollowUps} 次；若已经获得足够证据，可以更早结束追问。
+${backgroundContext}
 
 ## 关键原则
 1. 一次只问一个问题，语音回复尽量 1-3 句话，像真实面试官，不要念长篇说明。
@@ -139,6 +168,7 @@ ${ctx.objective ? `- Role/objective: ${ctx.objective}` : ""}
 - Active question: ${total ? `${current + 1}/${total}` : "open-ended"}
 - Question: ${active?.text ?? "Run an open-ended role-relevant interview"}
 - Follow-ups: up to ${maxFollowUps}, but stop earlier when evidence is sufficient.
+${backgroundContext}
 
 ## Rules
 1. Ask one question at a time. Keep spoken turns concise (usually 1-3 sentences).
