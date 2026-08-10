@@ -2,7 +2,52 @@
 
 This fork uses the official OpenAI Realtime API as the primary live interview engine while keeping Aural's existing browser protocol, session UI, question state, transcript persistence, and downstream reporting intact.
 
-## Product architecture
+## End-to-end product flow
+
+The self-service mock interview path is now:
+
+```text
+New Interview
+  │
+  ├─ upload resume PDF
+  ├─ upload/paste JD
+  └─ describe target interview
+          │
+          ▼
+AI Generator
+  ├─ generates questions / assessment criteria
+  └─ uses resume + JD during generation
+          │
+          ▼
+Accept & Create
+  ├─ persists interview + questions
+  ├─ persists extracted resume/JD via prep.updateContext
+  └─ redirects to Prep
+          │
+          ▼
+Prep
+  ├─ existing focused per-question coaching
+  └─ Start live mock interview
+          │
+          ▼
+Private owner-only live session
+  ├─ no publish required
+  ├─ no public slug required
+  └─ /practice/live/{interviewId}?sid=...
+          │
+          ▼
+GPT-Realtime-2.1 live interviewer
+          │
+          ▼
+Aural transcript/session persistence
+          │
+          ▼
+Interview report + return to weak-area practice
+```
+
+The live-practice session is created by `POST /api/practice/live-session`. It is authenticated and intentionally owner-only. This avoids publishing an interview merely to practice against it, which is especially important when the interview contains a personal resume and JD context.
+
+## Realtime architecture
 
 ```text
 Resume + JD + interview configuration
@@ -70,6 +115,17 @@ The legacy Azure relay remains available for comparison/fallback:
 npm run dev:openai-voice:legacy-azure
 ```
 
+## Resume/JD persistence
+
+Aural's AI Generator already extracted resume/JD text and used it while generating the interview. This fork also persists those extracted source texts after `Accept & Create` by calling the existing `prep.updateContext` mutation.
+
+That means the user does not need to upload the same documents again before live practice. The same source context is available to:
+
+- question generation;
+- focused Prep coaching;
+- the live Realtime interviewer;
+- downstream interview review/reporting context.
+
 ## Interview behavior
 
 The live interviewer is evidence-driven rather than a fixed quiz reader. It is instructed to:
@@ -95,7 +151,7 @@ This keeps long source documents from dominating the live context and cost.
 
 A voice interview needs more than merely stopping the speaker. With WebSocket Realtime, the client is responsible for keeping model context aligned with what the user actually heard.
 
-When candidate speech starts, the relay now:
+When candidate speech starts while assistant speech is still active, the relay:
 
 1. tells the Aural browser to stop queued assistant playback immediately;
 2. tracks the current assistant audio item and generated PCM duration;
@@ -103,6 +159,8 @@ When candidate speech starts, the relay now:
 4. sends `conversation.item.truncate` so unheard assistant audio is removed from the Realtime conversation state.
 
 This prevents a common failure mode where the model assumes the candidate heard a sentence that was actually interrupted.
+
+The relay also distinguishes a true barge-in from a normal next turn. If the Realtime response has finished and the estimated browser playback tail has elapsed, the candidate beginning to speak does **not** emit an `interrupt` event or clear the completed interviewer transcript.
 
 The current relay uses a server-side playback estimate because Aural's existing browser protocol does not expose an exact playback cursor. A later transport refinement can report the browser's true playback position for sample-accurate truncation, but the current implementation is intentionally conservative and keeps the existing UI protocol unchanged.
 
@@ -137,13 +195,22 @@ It returns event types already handled by `src/hooks/use-voice.ts`, including:
 - `interview_complete`
 - `error` / `disconnected`
 
-## Security
+## Private live practice and security
 
 `OPENAI_API_KEY` is read only by the relay server. Never place it in a `NEXT_PUBLIC_*` variable or ship it to browser/mobile code.
 
+For self-practice, the new live-session API:
+
+- requires an authenticated user;
+- verifies the current user is the interview creator;
+- requires at least one interview question;
+- creates the session through Aural's existing `create_interview_session` RPC;
+- does not require `publicSlug` or `isActive`;
+- does not publish the interview.
+
 For an internet deployment, terminate TLS at the reverse proxy and expose the browser-facing relay as `wss://...`; keep the OpenAI key in the server secret store.
 
-Note: Aural's existing public interview/session data routes currently return broad interview records. This fork does not redesign that data-access boundary in this PR; the Realtime transport protects the OpenAI credential, but a production privacy hardening pass should narrow public interview DTOs if resumes contain sensitive candidate data.
+Note: Aural's existing public interview/session data routes currently return broad interview records. This fork avoids those public routes for the new private self-practice path, but it does not redesign every legacy public DTO in this PR. A production privacy hardening pass should still narrow public interview DTOs if public interviews can contain sensitive candidate data.
 
 ## Tuning
 
@@ -209,8 +276,19 @@ npm run test:web
 npm run build
 ```
 
-Then run a live voice interview and explicitly test normal turns, candidate barge-in, manual next/previous question, text input, code update, whiteboard update, and interview completion.
+Then run the full self-service path:
+
+1. create a new interview;
+2. upload a resume and JD;
+3. generate and accept the interview;
+4. confirm Prep opens with the saved context;
+5. start private live mock interview;
+6. test normal turns and genuine candidate barge-in;
+7. test manual next/previous question;
+8. test optional text input, code update, and whiteboard update;
+9. complete the interview;
+10. open the specific session report and return to weak-area practice.
 
 ## Post-interview evaluation
 
-Realtime handles the low-latency interviewer. Post-interview scoring should remain a separate model pass over the saved transcript plus resume/JD and interview evidence. Keeping these paths separate lets the product optimize live latency and report quality independently.
+Realtime handles the low-latency interviewer. Post-interview scoring remains a separate model pass over the saved transcript plus resume/JD and interview evidence. Keeping these paths separate lets the product optimize live latency and report quality independently.
