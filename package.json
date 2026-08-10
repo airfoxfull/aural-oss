@@ -25,7 +25,7 @@
     "test:functional": "node --import tsx --test --test-concurrency=1 tests/functional.test.ts",
     "db:types": "npx supabase gen types typescript --local > src/lib/supabase/types.ts",
     "dev:voice": "npx tsx server/voice-relay.ts",
-    "dev:openai-voice": "npx tsx server/openai-realtime-2.1-relay.ts",
+    "dev:openai-voice": "npx tsx server/openai-realtime-direct-relay.ts",
     "dev:openai-voice:legacy-azure": "npx tsx server/openai-voice-relay.ts"
   },
   "dependencies": {
