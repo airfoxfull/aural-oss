@@ -1,9 +1,8 @@
 import { randomUUID } from "crypto";
 import { config } from "dotenv";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { createLogger } from "../src/lib/logger";
 import {
-  buildInterviewInstructions,
   buildRealtimeSessionUpdate,
   clampQuestionIndex,
   hex16kPcmTo24kBase64,
@@ -180,10 +179,7 @@ function transitionQuestion(
   sendUpstream(session, responseCreate(transitionPrompt));
 }
 
-function handleFunctionCall(
-  session: RelaySession,
-  event: JsonRecord,
-): void {
+function handleFunctionCall(session: RelaySession, event: JsonRecord): void {
   if (!session.context) return;
   const name = typeof event.name === "string" ? event.name : "";
   if (name !== "signal_question_change") return;
@@ -220,7 +216,7 @@ function handleFunctionCall(
   }
 }
 
-function handleUpstreamEvent(session: RelaySession, raw: WebSocket.RawData): void {
+function handleUpstreamEvent(session: RelaySession, raw: RawData): void {
   let event: JsonRecord;
   try {
     event = JSON.parse(raw.toString()) as JsonRecord;
@@ -396,7 +392,7 @@ function connectOpenAI(session: RelaySession): void {
   });
 }
 
-function handleBrowserMessage(session: RelaySession, raw: WebSocket.RawData): void {
+function handleBrowserMessage(session: RelaySession, raw: RawData): void {
   let message: JsonRecord;
   try {
     message = JSON.parse(raw.toString()) as JsonRecord;
