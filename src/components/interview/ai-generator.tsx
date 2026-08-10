@@ -320,6 +320,7 @@ export function AIGenerator({ projectId }: { projectId?: string } = {}) {
 
   const createMutation = trpc.interview.create.useMutation();
   const createQuestionMutation = trpc.question.create.useMutation();
+  const updatePrepContextMutation = trpc.prep.updateContext.useMutation();
 
   /** Consume an SSE stream from generate/refine and return parsed data. */
   const consumeStream = async (response: Response): Promise<GeneratedInterview> => {
@@ -569,8 +570,16 @@ export function AIGenerator({ projectId }: { projectId?: string } = {}) {
         )
       );
 
+      if (jdText || resumeText) {
+        await updatePrepContextMutation.mutateAsync({
+          interviewId: interview.id,
+          jobDescription: jdText || null,
+          resumeText: resumeText || null,
+        });
+      }
+
       toast({ title: "Interview created!" });
-      router.push(`/interviews/${interview.id}/edit/sessions`);
+      router.push(`/interviews/${interview.id}/prep`);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Something went wrong";
       toast({ title: "Error saving interview", description: message, variant: "destructive" });
