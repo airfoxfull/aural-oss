@@ -139,8 +139,14 @@ export default function SlugSessionPage() {
   // Show mock tour interface before loading the real session
   if (showPreviewTour) {
     const mode = useVoice ? "voice" : "chat";
-    const mockContext: InterviewContext = {
+    const mockContext: InterviewContext & {
+      jobDescription?: string | null;
+      candidateProfile?: string | null;
+    } = {
       title: interview.data.title,
+      objective: interview.data.objective,
+      jobDescription: interview.data.jobDescription,
+      candidateProfile: interview.data.resumeText,
       aiName: interview.data.aiName ?? "AI Interviewer",
       aiTone: "professional",
       language: interview.data.language ?? "en-US",
@@ -197,6 +203,8 @@ export default function SlugSessionPage() {
     const interviewContext = {
       title: interview.data.title,
       objective: interview.data.objective,
+      jobDescription: interview.data.jobDescription,
+      candidateProfile: interview.data.resumeText,
       aiName: interview.data.aiName,
       aiTone: interview.data.aiTone,
       language: interview.data.language,

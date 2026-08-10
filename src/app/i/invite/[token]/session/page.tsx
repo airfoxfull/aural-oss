@@ -97,6 +97,8 @@ export default function InviteSessionPage() {
     const interviewContext = {
       title: interview.title,
       objective: interview.objective,
+      jobDescription: interview.jobDescription,
+      candidateProfile: interview.resumeText,
       aiName: interview.aiName,
       aiTone: interview.aiTone,
       language: interview.language,
