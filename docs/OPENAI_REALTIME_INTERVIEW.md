@@ -1,30 +1,41 @@
 # OpenAI Realtime Interview Mode
 
-This fork uses the official OpenAI Realtime API as the primary voice-interview engine while keeping Aural's existing browser protocol and UI intact.
+This fork uses the official OpenAI Realtime API as the primary live interview engine while keeping Aural's existing browser protocol, session UI, question state, transcript persistence, and downstream reporting intact.
 
-## Architecture
+## Product architecture
 
 ```text
+Resume + JD + interview configuration
+              │
+              ▼
 Aural browser
   ├─ microphone: 16 kHz PCM, hex over WebSocket
-  ├─ interview context / question state
+  ├─ interview/question state
+  ├─ resume + JD context
   └─ code + whiteboard context
-          │
-          ▼
+              │
+              ▼
 server/openai-realtime-direct-relay.ts
   ├─ keeps OPENAI_API_KEY server-side
   ├─ resamples 16 kHz → 24 kHz PCM
   ├─ maps Aural relay events ↔ OpenAI Realtime events
   ├─ semantic/server VAD + barge-in
+  ├─ truncates unheard assistant audio after interruption
   ├─ input transcription
   └─ question-state Function Calling
-          │
-          ▼
-OpenAI Realtime API (`gpt-realtime` by default)
-          │
-          ▼
+              │
+              ▼
+OpenAI Realtime API
+  └─ gpt-realtime-2.1 by default
+              │
+              ▼
 24 kHz PCM audio + transcript + tool calls
+              │
+              ▼
+Aural transcript/session/report pipeline
 ```
+
+For a cost-sensitive deployment, set `OPENAI_REALTIME_MODEL=gpt-realtime-2.1-mini` without changing application code.
 
 ## Local setup
 
@@ -38,7 +49,7 @@ OPENAI_API_KEY=sk-...
 3. Recommended voice settings:
 
 ```bash
-OPENAI_REALTIME_MODEL=gpt-realtime
+OPENAI_REALTIME_MODEL=gpt-realtime-2.1
 OPENAI_REALTIME_VOICE=marin
 OPENAI_REALTIME_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
 OPENAI_REALTIME_VAD=semantic_vad
@@ -53,7 +64,7 @@ npm run dev
 npm run dev:openai-voice
 ```
 
-The legacy Azure relay remains available for comparison:
+The legacy Azure relay remains available for comparison/fallback:
 
 ```bash
 npm run dev:openai-voice:legacy-azure
@@ -61,18 +72,45 @@ npm run dev:openai-voice:legacy-azure
 
 ## Interview behavior
 
-The Realtime system instructions are intentionally evidence-driven instead of acting like a fixed quiz reader. The interviewer should:
+The live interviewer is evidence-driven rather than a fixed quiz reader. It is instructed to:
 
-- ask one question at a time;
+- ask one question at a time and keep spoken turns concise;
+- use the JD and resume as silent evidence context rather than reading them aloud;
+- prioritize resume claims most relevant to the target role;
 - probe individual ownership, why a decision was made, validation, metrics, failures, alternatives, and trade-offs;
-- avoid giving model answers or scores during the interview;
-- stay on vague answers and move on early when evidence is sufficient;
+- treat vague "we did X" answers as a reason to ask for the candidate's own work and evidence;
+- avoid giving model answers, coaching, or scores during the live interview;
+- stay on vague answers and move on early once sufficient evidence has been gathered;
 - use `signal_question_change` to keep the voice agent and Aural UI on the same question index;
 - treat code and whiteboard snapshots as silent context unless the candidate asks the interviewer to inspect them.
 
+Resume/JD text is bounded before it is inserted into Realtime instructions:
+
+- JD: up to 12,000 characters;
+- resume/profile: up to 16,000 characters.
+
+This keeps long source documents from dominating the live context and cost.
+
+## Interruption / barge-in
+
+A voice interview needs more than merely stopping the speaker. With WebSocket Realtime, the client is responsible for keeping model context aligned with what the user actually heard.
+
+When candidate speech starts, the relay now:
+
+1. tells the Aural browser to stop queued assistant playback immediately;
+2. tracks the current assistant audio item and generated PCM duration;
+3. estimates the playback point with a small jitter-buffer guard;
+4. sends `conversation.item.truncate` so unheard assistant audio is removed from the Realtime conversation state.
+
+This prevents a common failure mode where the model assumes the candidate heard a sentence that was actually interrupted.
+
+## Response isolation
+
+Realtime may emit overlapping lifecycle events around tool calls and question transitions. The relay stores assistant-output/function-call state by `response_id` rather than a single global response flag, so a tool-triggered question transition does not accidentally inherit completion state from the previous response.
+
 ## Browser protocol compatibility
 
-No browser rewrite is required. The new relay accepts the existing Aural messages:
+No browser rewrite is required. The relay accepts the existing Aural messages:
 
 - `init`
 - `audio`
@@ -82,7 +120,7 @@ No browser rewrite is required. The new relay accepts the existing Aural message
 - `code_update`
 - `whiteboard_update`
 
-It returns the event types already handled by `src/hooks/use-voice.ts`, including:
+It returns event types already handled by `src/hooks/use-voice.ts`, including:
 
 - `ready`
 - `interrupt`
@@ -99,9 +137,11 @@ It returns the event types already handled by `src/hooks/use-voice.ts`, includin
 
 ## Security
 
-`OPENAI_API_KEY` is read only by the relay server. Do not place it in a `NEXT_PUBLIC_*` variable or ship it to browser/mobile code.
+`OPENAI_API_KEY` is read only by the relay server. Never place it in a `NEXT_PUBLIC_*` variable or ship it to browser/mobile code.
 
 For an internet deployment, terminate TLS at the reverse proxy and expose the browser-facing relay as `wss://...`; keep the OpenAI key in the server secret store.
+
+Note: Aural's existing public interview/session data routes currently return broad interview records. This fork does not redesign that data-access boundary in this PR; the Realtime transport protects the OpenAI credential, but a production privacy hardening pass should narrow public interview DTOs if resumes contain sensitive candidate data.
 
 ## Tuning
 
@@ -123,9 +163,23 @@ OPENAI_REALTIME_VAD=server_vad
 
 The server-VAD fallback currently uses a 650 ms silence threshold in `buildRealtimeSessionUpdate`.
 
+### Model cost
+
+Highest-quality default:
+
+```bash
+OPENAI_REALTIME_MODEL=gpt-realtime-2.1
+```
+
+Lower-cost option:
+
+```bash
+OPENAI_REALTIME_MODEL=gpt-realtime-2.1-mini
+```
+
 ### Voice
 
-`marin` is the default in this fork. Set `OPENAI_REALTIME_VOICE` to another Realtime built-in voice if desired.
+`marin` is the default in this fork. Set `OPENAI_REALTIME_VOICE` to another supported Realtime built-in voice if desired.
 
 ## Tests
 
@@ -135,8 +189,10 @@ The direct relay's pure logic is covered by:
 node --import tsx --test tests/openai-realtime-direct.test.ts
 ```
 
-The test is also included in `npm run test:web`.
+The test is also included in `npm run test:web` and covers audio resampling, input validation, context clipping, resume/JD-aware prompt construction, Realtime session schema, semantic VAD, and question-transition parsing.
 
-## Next product layer
+The repository CI also defines lint, TypeScript checking, web tests, functional tests, and a Next.js build. On a fresh fork, GitHub Actions may need to be enabled before those checks appear on the PR.
 
-The transport is intentionally separated from post-interview evaluation. Realtime handles the live interviewer. Scoring/report generation should continue as a separate model pass over the saved transcript, resume/JD context, and interview evidence so live latency and report quality can be optimized independently.
+## Post-interview evaluation
+
+Realtime handles the low-latency interviewer. Post-interview scoring should remain a separate model pass over the saved transcript plus resume/JD and interview evidence. Keeping these paths separate lets the product optimize live latency and report quality independently.
