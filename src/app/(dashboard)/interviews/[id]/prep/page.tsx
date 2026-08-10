@@ -17,16 +17,17 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { usePrepSessionLeave } from "@/hooks/use-prep-session-leave";
 import { useToast } from "@/hooks/use-toast";
 import { trpc } from "@/lib/trpc/client";
-import { BrainCircuit } from "lucide-react";
+import { BrainCircuit, Loader2, Mic } from "lucide-react";
 import Link from "next/link";
-import { useParams, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const DEFAULT_MODE = "VOICE" as const;
 
 export default function FocusedPrepPage() {
   const params = useParams();
   const searchParams = useSearchParams();
+  const router = useRouter();
   const interviewId = params.id as string;
   const resumeSessionId = searchParams.get("session");
   /** Question to open first (e.g. "Practice this question" from the answer bank). */
@@ -43,6 +44,7 @@ export default function FocusedPrepPage() {
   );
   const [activeQuestions, setActiveQuestions] = useState<PrepQuestion[]>([]);
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
+  const [isStartingLive, setIsStartingLive] = useState(false);
   const timerCompletedRef = useRef(false);
   const startAttemptedRef = useRef(false);
 
@@ -141,6 +143,34 @@ export default function FocusedPrepPage() {
   const hasContext =
     !!interview?.jobDescription?.trim() || !!interview?.resumeText?.trim();
 
+  const handleStartLive = useCallback(async () => {
+    if (isStartingLive) return;
+    setIsStartingLive(true);
+    try {
+      const response = await fetch("/api/practice/live-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ interviewId }),
+      });
+      const result = (await response.json()) as {
+        sessionId?: string;
+        error?: string;
+      };
+      if (!response.ok || !result.sessionId) {
+        throw new Error(result.error || "Could not create live practice session");
+      }
+      router.push(`/practice/live/${interviewId}?sid=${encodeURIComponent(result.sessionId)}`);
+    } catch (error) {
+      setIsStartingLive(false);
+      toast({
+        title: "Could not start live mock interview",
+        description:
+          error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    }
+  }, [interviewId, isStartingLive, router, toast]);
+
   usePrepSessionLeave(sessionId, !practiceCompleted && !endSession.isPending);
 
   if (bundleQuery.isLoading) {
@@ -233,34 +263,55 @@ export default function FocusedPrepPage() {
 
   return (
     <TooltipProvider>
-      <PracticeSessionChat
-        interviewId={interviewId}
-        sessionId={sessionId}
-        interviewTitle={interview.title}
-        language={interview.language}
-        hasContext={hasContext}
-        prepContext={{
-          jobDescription: interview.jobDescription ?? null,
-          resumeText: interview.resumeText ?? null,
-          companyName: interview.companyName ?? null,
-          roleTitle: interview.roleTitle ?? null,
-        }}
-        onPrepContextSaved={() =>
-          utils.prep.getBundle.invalidate({ interviewId })
-        }
-        questions={activeQuestions}
-        initialQuestionId={startQuestionId}
-        mode={DEFAULT_MODE}
-        remainingSeconds={remainingSeconds}
-        attempts={attempts}
-        planTier={planTier}
-        mediaRetentionDays={mediaRetentionDays}
-        onAttemptCreated={() =>
-          utils.prep.getBundle.invalidate({ interviewId })
-        }
-        onFinish={() => endSession.mutate({ sessionId })}
-        isFinishing={endSession.isPending}
-      />
+      <div className="flex min-h-0 flex-col gap-3">
+        <div className="flex items-center justify-between rounded-lg border bg-card px-4 py-3 shadow-sm">
+          <div>
+            <p className="text-sm font-medium">Ready for a realistic interview?</p>
+            <p className="text-xs text-muted-foreground">
+              GPT-Realtime-2.1 will interview you live using this resume, JD, and question plan.
+            </p>
+          </div>
+          <Button onClick={handleStartLive} disabled={isStartingLive}>
+            {isStartingLive ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Mic className="mr-2 h-4 w-4" />
+            )}
+            Start live mock interview
+          </Button>
+        </div>
+
+        <div className="min-h-0 flex-1">
+          <PracticeSessionChat
+            interviewId={interviewId}
+            sessionId={sessionId}
+            interviewTitle={interview.title}
+            language={interview.language}
+            hasContext={hasContext}
+            prepContext={{
+              jobDescription: interview.jobDescription ?? null,
+              resumeText: interview.resumeText ?? null,
+              companyName: interview.companyName ?? null,
+              roleTitle: interview.roleTitle ?? null,
+            }}
+            onPrepContextSaved={() =>
+              utils.prep.getBundle.invalidate({ interviewId })
+            }
+            questions={activeQuestions}
+            initialQuestionId={startQuestionId}
+            mode={DEFAULT_MODE}
+            remainingSeconds={remainingSeconds}
+            attempts={attempts}
+            planTier={planTier}
+            mediaRetentionDays={mediaRetentionDays}
+            onAttemptCreated={() =>
+              utils.prep.getBundle.invalidate({ interviewId })
+            }
+            onFinish={() => endSession.mutate({ sessionId })}
+            isFinishing={endSession.isPending}
+          />
+        </div>
+      </div>
     </TooltipProvider>
   );
 }
