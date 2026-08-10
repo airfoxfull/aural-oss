@@ -34,6 +34,7 @@ const OPENAI_REALTIME_WS_URL =
 // the browser relay protocol does not expose an exact playback cursor, subtract a
 // conservative guard from wall-clock playback when estimating what was heard.
 const PLAYBACK_GUARD_MS = 180;
+const PLAYBACK_TAIL_ALLOWANCE_MS = 350;
 const PCM24_MONO_BYTES_PER_MS = 48; // 24,000 samples/sec * 2 bytes / 1,000
 
 if (!OPENAI_API_KEY) {
@@ -161,6 +162,20 @@ function resetAudioTracking(session: RelaySession): void {
   session.lastAudioBytesSent = 0;
 }
 
+function assistantAudioMayStillBePlaying(session: RelaySession): boolean {
+  if (
+    !session.lastAudioItemId ||
+    !session.lastAudioFirstSentAt ||
+    session.lastAudioBytesSent <= 0
+  ) {
+    return false;
+  }
+
+  const generatedMs = session.lastAudioBytesSent / PCM24_MONO_BYTES_PER_MS;
+  const elapsedMs = Math.max(0, Date.now() - session.lastAudioFirstSentAt);
+  return elapsedMs <= generatedMs + PLAYBACK_TAIL_ALLOWANCE_MS;
+}
+
 function truncateUnheardAssistantAudio(session: RelaySession): void {
   const itemId = session.lastAudioItemId;
   if (!itemId || session.lastAudioBytesSent <= 0) return;
@@ -186,9 +201,23 @@ function truncateUnheardAssistantAudio(session: RelaySession): void {
 }
 
 function interruptAssistantPlayback(session: RelaySession): void {
-  if (!session.lastAudioItemId && !session.responseActive) return;
+  const playbackLikelyActive = assistantAudioMayStillBePlaying(session);
+
+  // A normal interview turn starts after the interviewer has completely finished
+  // speaking. Realtime still emits speech_started for that user turn; do not treat
+  // it as a barge-in merely because we retain the last assistant item for possible
+  // truncation. This also avoids clearing the finished AI transcript in the Aural UI.
+  if (!session.responseActive && !playbackLikelyActive) {
+    resetAudioTracking(session);
+    return;
+  }
+
   safeJsonSend(session.browser, { type: "interrupt" });
-  truncateUnheardAssistantAudio(session);
+  if (playbackLikelyActive) {
+    truncateUnheardAssistantAudio(session);
+  } else {
+    resetAudioTracking(session);
+  }
 }
 
 function cancelActiveResponse(session: RelaySession): void {
