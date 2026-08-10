@@ -3,11 +3,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { PreparingScreen } from "@/components/session/preparing-screen";
-import type { InterviewContext } from "@/hooks/use-voice";
-import { trpc } from "@/lib/trpc/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { CheckCircle2, RotateCcw } from "lucide-react";
+import type { InterviewContext } from "@/hooks/use-voice";
+import { trpc } from "@/lib/trpc/client";
+import { BarChart3, CheckCircle2, RotateCcw } from "lucide-react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
@@ -104,16 +104,19 @@ export default function PrivateLivePracticePage() {
             <CheckCircle2 className="mx-auto h-14 w-14 text-primary" />
             <h1 className="mt-4 text-2xl font-semibold">Mock interview completed</h1>
             <p className="mt-2 text-sm text-muted-foreground">
-              Your transcript was saved and Aural can generate the normal session analysis from this interview.
+              Your transcript was saved. Open the session report to review the full interview analysis, then return to focused practice for weak areas.
             </p>
             <div className="mt-6 flex flex-col justify-center gap-2 sm:flex-row">
               <Button asChild>
-                <Link href={`/practice/${interviewId}`}>Review and practice</Link>
+                <Link href={`/interviews/${interviewId}/results?session=${encodeURIComponent(sessionId)}`}>
+                  <BarChart3 className="mr-2 h-4 w-4" />
+                  View interview report
+                </Link>
               </Button>
               <Button variant="outline" asChild>
                 <Link href={`/practice/${interviewId}`}>
                   <RotateCcw className="mr-2 h-4 w-4" />
-                  Start another round
+                  Practice weak areas
                 </Link>
               </Button>
             </div>
