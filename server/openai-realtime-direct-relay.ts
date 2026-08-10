@@ -19,7 +19,7 @@ const log = createLogger("openai-realtime-direct");
 const RELAY_PORT =
   Number(process.env.OPENAI_VOICE_RELAY_PORT || process.env.VOICE_RELAY_PORT) || 8767;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime";
+const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1";
 const OPENAI_REALTIME_VOICE = process.env.OPENAI_REALTIME_VOICE || "marin";
 const OPENAI_REALTIME_TRANSCRIPTION_MODEL =
   process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
@@ -29,12 +29,25 @@ const OPENAI_REALTIME_WS_URL =
   process.env.OPENAI_REALTIME_WS_URL ||
   `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(OPENAI_REALTIME_MODEL)}`;
 
+// Aural buffers a small amount of PCM before playback. WebSocket Realtime clients
+// are responsible for truncating unheard assistant audio after a barge-in. Since
+// the browser relay protocol does not expose an exact playback cursor, subtract a
+// conservative guard from wall-clock playback when estimating what was heard.
+const PLAYBACK_GUARD_MS = 180;
+const PCM24_MONO_BYTES_PER_MS = 48; // 24,000 samples/sec * 2 bytes / 1,000
+
 if (!OPENAI_API_KEY) {
   log.error("Missing OPENAI_API_KEY. Add it to .env.local before starting the relay.");
   process.exit(1);
 }
 
 type JsonRecord = Record<string, unknown>;
+
+type ResponseState = {
+  hadAssistantOutput: boolean;
+  hadFunctionCall: boolean;
+  transcript: string;
+};
 
 interface RelaySession {
   id: string;
@@ -45,11 +58,14 @@ interface RelaySession {
   readySent: boolean;
   upstreamReady: boolean;
   responseActive: boolean;
-  responseHadAssistantOutput: boolean;
-  responseHadFunctionCall: boolean;
+  currentResponseId: string | null;
+  responses: Map<string, ResponseState>;
   closing: boolean;
   asrByItem: Map<string, string>;
-  assistantTranscript: string;
+  lastAudioItemId: string | null;
+  lastAudioContentIndex: number;
+  lastAudioFirstSentAt: number | null;
+  lastAudioBytesSent: number;
   keepAliveTimer: ReturnType<typeof setInterval> | null;
 }
 
@@ -73,6 +89,30 @@ function responseCreate(instructions?: string): JsonRecord {
   return instructions
     ? { type: "response.create", response: { instructions } }
     : { type: "response.create" };
+}
+
+function responseIdFromEvent(event: JsonRecord): string | null {
+  if (typeof event.response_id === "string") return event.response_id;
+  const response = event.response as JsonRecord | undefined;
+  return response && typeof response.id === "string" ? response.id : null;
+}
+
+function responseStateForEvent(
+  session: RelaySession,
+  event: JsonRecord,
+  create = true,
+): ResponseState | null {
+  const responseId = responseIdFromEvent(event) || session.currentResponseId;
+  if (!responseId) return null;
+  const existing = session.responses.get(responseId);
+  if (existing || !create) return existing || null;
+  const state: ResponseState = {
+    hadAssistantOutput: false,
+    hadFunctionCall: false,
+    transcript: "",
+  };
+  session.responses.set(responseId, state);
+  return state;
 }
 
 function questionText(ctx: InterviewContext, index: number): string {
@@ -112,6 +152,43 @@ function addUserText(session: RelaySession, text: string): void {
       content: [{ type: "input_text", text }],
     },
   });
+}
+
+function resetAudioTracking(session: RelaySession): void {
+  session.lastAudioItemId = null;
+  session.lastAudioContentIndex = 0;
+  session.lastAudioFirstSentAt = null;
+  session.lastAudioBytesSent = 0;
+}
+
+function truncateUnheardAssistantAudio(session: RelaySession): void {
+  const itemId = session.lastAudioItemId;
+  if (!itemId || session.lastAudioBytesSent <= 0) return;
+
+  const generatedMs = session.lastAudioBytesSent / PCM24_MONO_BYTES_PER_MS;
+  const elapsedMs = session.lastAudioFirstSentAt
+    ? Math.max(0, Date.now() - session.lastAudioFirstSentAt - PLAYBACK_GUARD_MS)
+    : 0;
+  const heardMs = Math.max(0, Math.min(generatedMs, elapsedMs));
+
+  sendUpstream(session, {
+    type: "conversation.item.truncate",
+    item_id: itemId,
+    content_index: session.lastAudioContentIndex,
+    audio_end_ms: Math.floor(heardMs),
+  });
+
+  log.debug(
+    `Truncated assistant audio item ${itemId} at ~${Math.floor(heardMs)}ms ` +
+      `(generated ~${Math.floor(generatedMs)}ms)`,
+  );
+  resetAudioTracking(session);
+}
+
+function interruptAssistantPlayback(session: RelaySession): void {
+  if (!session.lastAudioItemId && !session.responseActive) return;
+  safeJsonSend(session.browser, { type: "interrupt" });
+  truncateUnheardAssistantAudio(session);
 }
 
 function cancelActiveResponse(session: RelaySession): void {
@@ -186,10 +263,11 @@ function handleFunctionCall(session: RelaySession, event: JsonRecord): void {
 
   const callId = typeof event.call_id === "string" ? event.call_id : "";
   const raw = typeof event.arguments === "string" ? event.arguments : "{}";
+  const state = responseStateForEvent(session, event);
+  if (state) state.hadFunctionCall = true;
 
   try {
     const parsed = parseQuestionChangeArguments(raw, session.context.questions.length);
-    session.responseHadFunctionCall = true;
     transitionQuestion(session, parsed.questionIndex, {
       auto: true,
       direction: "next",
@@ -246,9 +324,10 @@ function handleUpstreamEvent(session: RelaySession, raw: RawData): void {
       break;
 
     case "input_audio_buffer.speech_started":
-      if (session.responseActive) {
-        safeJsonSend(session.browser, { type: "interrupt" });
-      }
+      // With WebSocket transport OpenAI cannot know what the end user has
+      // actually heard. Stop local playback and truncate the assistant item so
+      // unheard speech is removed from model context before the user continues.
+      interruptAssistantPlayback(session);
       break;
 
     case "conversation.item.input_audio_transcription.delta": {
@@ -284,19 +363,38 @@ function handleUpstreamEvent(session: RelaySession, raw: RawData): void {
       break;
     }
 
-    case "response.created":
+    case "response.created": {
+      const responseId = responseIdFromEvent(event) || randomUUID();
+      session.currentResponseId = responseId;
+      session.responses.set(responseId, {
+        hadAssistantOutput: false,
+        hadFunctionCall: false,
+        transcript: "",
+      });
       session.responseActive = true;
-      session.responseHadAssistantOutput = false;
-      session.responseHadFunctionCall = false;
-      session.assistantTranscript = "";
       safeJsonSend(session.browser, { type: "response_started" });
       break;
+    }
 
     case "response.output_audio.delta": {
       const delta = typeof event.delta === "string" ? event.delta : "";
       if (!delta) break;
-      session.responseHadAssistantOutput = true;
-      safeBinarySend(session.browser, Buffer.from(delta, "base64"));
+      const pcm = Buffer.from(delta, "base64");
+      const state = responseStateForEvent(session, event);
+      if (state) state.hadAssistantOutput = true;
+
+      const itemId = typeof event.item_id === "string" ? event.item_id : null;
+      const contentIndex =
+        typeof event.content_index === "number" ? Math.trunc(event.content_index) : 0;
+      if (itemId && itemId !== session.lastAudioItemId) {
+        session.lastAudioItemId = itemId;
+        session.lastAudioContentIndex = contentIndex;
+        session.lastAudioFirstSentAt = Date.now();
+        session.lastAudioBytesSent = 0;
+      }
+      if (itemId) session.lastAudioBytesSent += pcm.length;
+
+      safeBinarySend(session.browser, pcm);
       break;
     }
 
@@ -304,17 +402,21 @@ function handleUpstreamEvent(session: RelaySession, raw: RawData): void {
     case "response.output_text.delta": {
       const delta = typeof event.delta === "string" ? event.delta : "";
       if (!delta) break;
-      session.responseHadAssistantOutput = true;
-      session.assistantTranscript += delta;
+      const state = responseStateForEvent(session, event);
+      if (state) {
+        state.hadAssistantOutput = true;
+        state.transcript += delta;
+      }
       safeJsonSend(session.browser, { type: "chat", data: { delta } });
       break;
     }
 
     case "response.output_audio_transcript.done": {
       const transcript = typeof event.transcript === "string" ? event.transcript : "";
-      if (transcript && !session.assistantTranscript) {
-        session.responseHadAssistantOutput = true;
-        session.assistantTranscript = transcript;
+      const state = responseStateForEvent(session, event);
+      if (transcript && state && !state.transcript) {
+        state.hadAssistantOutput = true;
+        state.transcript = transcript;
         safeJsonSend(session.browser, { type: "chat", data: { delta: transcript } });
       }
       break;
@@ -322,9 +424,10 @@ function handleUpstreamEvent(session: RelaySession, raw: RawData): void {
 
     case "response.output_text.done": {
       const text = typeof event.text === "string" ? event.text : "";
-      if (text && !session.assistantTranscript) {
-        session.responseHadAssistantOutput = true;
-        session.assistantTranscript = text;
+      const state = responseStateForEvent(session, event);
+      if (text && state && !state.transcript) {
+        state.hadAssistantOutput = true;
+        state.transcript = text;
         safeJsonSend(session.browser, { type: "chat", data: { delta: text } });
       }
       break;
@@ -334,12 +437,19 @@ function handleUpstreamEvent(session: RelaySession, raw: RawData): void {
       handleFunctionCall(session, event);
       break;
 
-    case "response.done":
-      session.responseActive = false;
-      if (session.responseHadAssistantOutput && !session.responseHadFunctionCall) {
+    case "response.done": {
+      const responseId = responseIdFromEvent(event) || session.currentResponseId;
+      const state = responseId ? session.responses.get(responseId) : null;
+      if (responseId === session.currentResponseId) {
+        session.currentResponseId = null;
+        session.responseActive = false;
+      }
+      if (state?.hadAssistantOutput && !state.hadFunctionCall) {
         safeJsonSend(session.browser, { type: "tts_ended" });
       }
+      if (responseId) session.responses.delete(responseId);
       break;
+    }
 
     case "error": {
       const error = event.error as JsonRecord | undefined;
@@ -443,6 +553,7 @@ function handleBrowserMessage(session: RelaySession, raw: RawData): void {
     case "text_input": {
       const content = typeof message.content === "string" ? message.content.trim() : "";
       if (!content) return;
+      interruptAssistantPlayback(session);
       cancelActiveResponse(session);
       addUserText(session, content);
       sendUpstream(session, responseCreate());
@@ -453,6 +564,7 @@ function handleBrowserMessage(session: RelaySession, raw: RawData): void {
       const total = session.context.questions.length;
       const target = Math.min(total, session.currentQuestionIndex + 1);
       safeJsonSend(session.browser, { type: "transitioning", direction: "next", auto: false });
+      interruptAssistantPlayback(session);
       cancelActiveResponse(session);
       transitionQuestion(session, target, { auto: false, direction: "next" });
       break;
@@ -461,6 +573,7 @@ function handleBrowserMessage(session: RelaySession, raw: RawData): void {
     case "prev_question": {
       const target = Math.max(0, session.currentQuestionIndex - 1);
       safeJsonSend(session.browser, { type: "transitioning", direction: "previous", auto: false });
+      interruptAssistantPlayback(session);
       cancelActiveResponse(session);
       transitionQuestion(session, target, { auto: false, direction: "previous" });
       break;
@@ -514,11 +627,14 @@ wss.on("connection", (browser) => {
     readySent: false,
     upstreamReady: false,
     responseActive: false,
-    responseHadAssistantOutput: false,
-    responseHadFunctionCall: false,
+    currentResponseId: null,
+    responses: new Map(),
     closing: false,
     asrByItem: new Map(),
-    assistantTranscript: "",
+    lastAudioItemId: null,
+    lastAudioContentIndex: 0,
+    lastAudioFirstSentAt: null,
+    lastAudioBytesSent: 0,
     keepAliveTimer: null,
   };
 
