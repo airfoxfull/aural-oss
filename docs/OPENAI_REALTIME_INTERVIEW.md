@@ -104,6 +104,8 @@ When candidate speech starts, the relay now:
 
 This prevents a common failure mode where the model assumes the candidate heard a sentence that was actually interrupted.
 
+The current relay uses a server-side playback estimate because Aural's existing browser protocol does not expose an exact playback cursor. A later transport refinement can report the browser's true playback position for sample-accurate truncation, but the current implementation is intentionally conservative and keeps the existing UI protocol unchanged.
+
 ## Response isolation
 
 Realtime may emit overlapping lifecycle events around tool calls and question transitions. The relay stores assistant-output/function-call state by `response_id` rather than a single global response flag, so a tool-triggered question transition does not accidentally inherit completion state from the previous response.
@@ -192,6 +194,22 @@ node --import tsx --test tests/openai-realtime-direct.test.ts
 The test is also included in `npm run test:web` and covers audio resampling, input validation, context clipping, resume/JD-aware prompt construction, Realtime session schema, semantic VAD, and question-transition parsing.
 
 The repository CI also defines lint, TypeScript checking, web tests, functional tests, and a Next.js build. On a fresh fork, GitHub Actions may need to be enabled before those checks appear on the PR.
+
+## Verification boundary
+
+The code path can be reviewed without credentials, but a real end-to-end voice smoke test requires a developer-controlled `OPENAI_API_KEY` in `.env.local`. Do not commit API keys to the repository or paste them into issue/PR comments.
+
+Before production deployment, run:
+
+```bash
+npm ci
+npm run lint
+npx tsc --noEmit
+npm run test:web
+npm run build
+```
+
+Then run a live voice interview and explicitly test normal turns, candidate barge-in, manual next/previous question, text input, code update, whiteboard update, and interview completion.
 
 ## Post-interview evaluation
 
