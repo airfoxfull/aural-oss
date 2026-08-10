@@ -35,7 +35,7 @@ OpenAI Realtime API
 Aural transcript/session/report pipeline
 ```
 
-For a cost-sensitive deployment, set `OPENAI_REALTIME_MODEL=gpt-realtime-2.1-mini` without changing application code.
+For a cost-sensitive deployment, set `OPENAI_REALTIME_MODEL=gpt-realtime-2.1-mini` without changing application code. The model ID is intentionally configurable so the relay can follow future Realtime model updates without another transport rewrite.
 
 ## Local setup
 
