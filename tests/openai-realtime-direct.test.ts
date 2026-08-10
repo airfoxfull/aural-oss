@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildInterviewInstructions,
   buildRealtimeSessionUpdate,
+  clipContextText,
   hex16kPcmTo24kBase64,
   parseQuestionChangeArguments,
   resample16To24,
@@ -12,6 +13,8 @@ import {
 const context: InterviewContext = {
   title: "AI Infra 技术面",
   objective: "验证候选人的 GPU 集群、RDMA 与分布式训练能力",
+  jobDescription: "负责大规模 GPU 集群、训练平台、RDMA 网络和推理部署。",
+  candidateProfile: "候选人简历：主导千卡 GPU 集群 RDMA 搭建，负责训练与推理基础设施。",
   aiName: "Alex",
   aiTone: "严格但专业",
   language: "zh",
@@ -44,15 +47,24 @@ test("hex16kPcmTo24kBase64 validates and converts audio", () => {
   assert.throws(() => hex16kPcmTo24kBase64("xyz"), /Invalid hex PCM/);
 });
 
-test("interview instructions are evidence-driven and question-scoped", () => {
+test("context clipping bounds large resume and JD text", () => {
+  assert.equal(clipContextText("  hello\r\nworld  ", 100), "hello\nworld");
+  const clipped = clipContextText("x".repeat(30), 10);
+  assert.equal(clipped, `${"x".repeat(10)}\n...[truncated]`);
+});
+
+test("interview instructions are evidence-driven, resume-aware, and question-scoped", () => {
   const instructions = buildInterviewInstructions(context, 0);
   assert.match(instructions, /真实能力/);
   assert.match(instructions, /你本人做了什么/);
   assert.match(instructions, /signal_question_change/);
   assert.match(instructions, /你为什么在这个项目里引入 RDMA/);
+  assert.match(instructions, /大规模 GPU 集群/);
+  assert.match(instructions, /千卡 GPU 集群 RDMA/);
+  assert.match(instructions, /不要因为简历写了某项能力就默认候选人掌握/);
 });
 
-test("session update uses GA Realtime audio schema and semantic VAD", () => {
+test("session update uses Realtime audio schema and semantic VAD", () => {
   const event = buildRealtimeSessionUpdate(context, 0, {
     voice: "marin",
     transcriptionModel: "gpt-4o-mini-transcribe",
